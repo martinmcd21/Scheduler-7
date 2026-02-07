@@ -2829,82 +2829,103 @@ def _extract_slots_from_email_body(text: str) -> List[Dict[str, str]]:
     return slots
 
 
+import re
+from typing import Optional, List, Dict
+
 def detect_slot_choice_from_text(text: str, slots: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
     """
-    Detect which slot the candidate chose from their reply.
+    Detects which slot the candidate selected based on their email reply text.
 
-    Handles:
-    1. Simple slot numbers: "3", "70", "slot 3", "#3", "option 3"
-    2. Full slot labels: "2026-01-26 01:00-01:30"
-    3. Date + time mentions
+    Candidate is expected to reply with a number corresponding to the slot list:
+        1
+        2
+        3
 
-    If the email body contains numbered slots (from the quoted original email),
-    those are extracted and used instead of the session state slots.
+    This version is robust against quoted email content, signatures, forwarded content,
+    Outlook/Gmail reply headers, etc.
     """
-    t = (text or "").strip()
 
-    # Try to extract slots from the email body (quoted original email)
-    # This is more reliable than session state which may have changed
-    email_slots = _extract_slots_from_email_body(t)
-
-    # Use email slots if we found them and they have more slots than session state
-    effective_slots = email_slots if len(email_slots) > len(slots or []) else (slots or [])
-
-    if not effective_slots:
+    if not text:
         return None
 
-    # Method 1: Look for slot number at the START of the reply (before quoted text)
-    # Email replies typically have the response at the top, then "On ... wrote:" and quoted text
-    # Extract just the reply part (before "On " or ">")
-    reply_text = t
+    # Normalize newlines and whitespace
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-    # Split on common reply markers
-    for marker in ["\nOn ", "\n>", "\r\n>", "On Mon,", "On Tue,", "On Wed,", "On Thu,", "On Fri,", "On Sat,", "On Sun,"]:
-        if marker in reply_text:
-            reply_text = reply_text.split(marker)[0]
-            break
+    # ------------------------------------------------------------
+    # STEP 1: Extract only the "top reply" portion.
+    # Most email clients put the user's reply at the top, then quoted text below.
+    # ------------------------------------------------------------
+    lines = [ln.strip() for ln in t.split("\n")]
 
-    reply_text = reply_text.strip()
+    # Remove empty lines at the top
+    while lines and lines[0] == "":
+        lines.pop(0)
 
-    # Look for slot number (1-3 digits to support up to 999 slots)
-    slot_num_patterns = [
-        r"^\s*(\d{1,3})\s*$",  # Just a number like "3" or "70" or "252"
-        r"^\s*(\d{1,3})\s*[\n\r.,!]",  # Number at start followed by newline or punctuation
-        r"^\s*(\d{1,3})\b",  # Number at the very start
-        r"(?:slot|option|choice|number|#)\s*(\d{1,3})\b",  # "slot 70", "#70", etc.
-        r"\b(\d{1,3})\s*(?:st|nd|rd|th)?\s*(?:slot|option|choice)",  # "70th slot"
+    # Take only first N lines to avoid scanning the quoted original email
+    top_reply = "\n".join(lines[:8]).strip()
+
+    # ------------------------------------------------------------
+    # STEP 2: Additional safety split on common reply/forward markers
+    # ------------------------------------------------------------
+    reply_markers = [
+        "\nOn ",                         # Gmail/Outlook reply header
+        "\nFrom:",                       # Outlook style
+        "\nSent:",                       # Outlook style
+        "\nTo:",                         # Outlook style
+        "\nSubject:",                    # Outlook style
+        "\n-----Original Message-----",  # Outlook separator
+        "\n>",                           # Quoted reply
     ]
 
-    for pattern in slot_num_patterns:
-        match = re.search(pattern, reply_text, re.IGNORECASE)
-        if match:
-            try:
-                slot_num = int(match.group(1))
-                if 1 <= slot_num <= len(effective_slots):
-                    return effective_slots[slot_num - 1]  # Convert to 0-indexed
-            except (ValueError, IndexError):
-                pass
+    reply_text = top_reply
+    for marker in reply_markers:
+        if marker in reply_text:
+            reply_text = reply_text.split(marker)[0].strip()
 
-    # Method 2: Look for full slot label in text
-    t_lower = t.lower()
-    for s in effective_slots:
-        label = format_slot_label(s).lower()
-        if label in t_lower:
-            return s
+    # ------------------------------------------------------------
+    # STEP 3: Look for a clean single-number reply (ideal case)
+    # ------------------------------------------------------------
+    # Example replies:
+    # "2"
+    # "2."
+    # "Slot 2"
+    # "Option 2 please"
+    # "I choose 2"
+    #
+    # We search line-by-line for best accuracy.
+    # ------------------------------------------------------------
+    for ln in reply_text.split("\n"):
+        ln_clean = ln.strip()
 
-    # Method 3: Look for date and time that match a slot
-    # Only match if the date+time actually corresponds to one of our slots
-    m_date = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", reply_text)
-    m_time = re.search(r"\b(\d{1,2}:\d{2})\b", reply_text)
-    if m_date and m_time:
-        date = m_date.group(1)
-        start = m_time.group(1).zfill(5)
-        for s in effective_slots:
-            if s.get("date") == date and s.get("start") == start:
-                return s
+        # Ignore empty lines
+        if not ln_clean:
+            continue
+
+        # Match a pure number like "2" or "2."
+        m = re.match(r"^(\d{1,3})\.?$", ln_clean)
+        if m:
+            choice_num = int(m.group(1))
+            if 1 <= choice_num <= len(slots):
+                return slots[choice_num - 1]
+
+        # Match phrases containing a number like "Option 2 please"
+        m2 = re.search(r"\b(\d{1,3})\b", ln_clean)
+        if m2:
+            choice_num = int(m2.group(1))
+            if 1 <= choice_num <= len(slots):
+                return slots[choice_num - 1]
+
+    # ------------------------------------------------------------
+    # STEP 4: As fallback, scan the whole top reply for a number
+    # (still safer than scanning the full email)
+    # ------------------------------------------------------------
+    m3 = re.search(r"\b(\d{1,3})\b", reply_text)
+    if m3:
+        choice_num = int(m3.group(1))
+        if 1 <= choice_num <= len(slots):
+            return slots[choice_num - 1]
 
     return None
-
 
 # ----------------------------
 # Graph + ICS helpers
