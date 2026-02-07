@@ -1,6 +1,5 @@
 import requests
 
-
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
@@ -14,10 +13,8 @@ class GraphAuthError(Exception):
 
 class GraphConfig:
     """
-    Compatibility class for your existing app.py imports.
-    Stores config values for GraphClient.
+    Compatibility config class expected by app.py
     """
-
     def __init__(self, tenant_id=None, client_id=None, client_secret=None):
         self.tenant_id = tenant_id
         self.client_id = client_id
@@ -43,16 +40,6 @@ class GraphClient:
         attachments: list = None,
         cc_emails: list = None
     ):
-        """
-        Sends an email using Microsoft Graph.
-        attachments is a list of dicts:
-            {
-                "name": "invite.ics",
-                "contentType": "text/calendar; method=REQUEST",
-                "contentBytes": "<base64 encoded bytes>"
-            }
-        """
-
         if attachments is None:
             attachments = []
 
@@ -86,10 +73,8 @@ class GraphClient:
         }
 
         url = f"{GRAPH_BASE}/users/{sender_email}/sendMail"
-
         r = requests.post(url, headers=self._headers(), json=payload)
 
-        # Graph returns 202 Accepted on success
         if r.status_code in (401, 403):
             raise GraphAuthError(f"Graph auth error: {r.status_code} {r.text}")
 
