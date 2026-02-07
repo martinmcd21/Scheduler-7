@@ -4589,40 +4589,7 @@ def _send_invite_for_email(email_data, detected_slot) -> bool:
     except Exception as e:
         st.error(f"Invite send failed: {e}")
         return False
-                # Parse candidate name from email if possible
-                candidate_name = _ensure_candidate_name("", cand_email)
-
-                # Create the invite
-                result = _create_individual_invite(
-                    audit=audit,
-                    selected_slot=detected_slot,
-                    tz_name=tz_name,
-                    candidate_timezone=candidate_tz,
-                    duration_minutes=duration,
-                    role_title=role_title,
-                    subject=subject,
-                    agenda=agenda,
-                    location=location,
-                    is_teams=is_teams,
-                    candidate=(cand_email, candidate_name),
-                    hiring_manager=(hm_email, hm_name),
-                    recruiter=(rec_email, rec_name),
-                    include_recruiter=include_recruiter,
-                    panel_interviewers=[
-                        {"name": p.get("name", ""), "email": p.get("email", "")}
-                        for p in panel_interviewers if p.get("email")
-                    ] if panel_interviewers else None,
-                )
-
-                if result.success:
-                    # Mark email as read after successful invite
-                    email_id = email_data.get("id", "")
-                    if email_id:
-                        mark_email_read_imap(email_id)
-                    return True
-                else:
-                    st.error(f"Failed to send invite to {cand_email}: {result.error}")
-                    return False
+                
 
             # AUTO-SEND PROCESSING: Process emails with detected slots before rendering UI
             if auto_send_invites and emails:
