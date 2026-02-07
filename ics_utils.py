@@ -9,22 +9,14 @@ class ICSValidationError(Exception):
 
 
 def stable_uid(*parts: str) -> str:
-    """
-    Generates a stable UID for the same interview slot.
-    This ensures Outlook treats resends as the SAME meeting, not a new one.
-    """
     base = "|".join([p.strip() for p in parts if p])
     digest = hashlib.sha256(base.encode("utf-8")).hexdigest()
     return f"{digest[:32]}@powerdashhr.com"
 
 
 def _fmt_dt(dt: datetime) -> str:
-    """
-    Format datetime to ICS UTC format: YYYYMMDDTHHMMSSZ
-    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-
     dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
@@ -48,9 +40,11 @@ class ICSInvite:
         if not self.summary:
             raise ICSValidationError("Missing summary")
         if not self.organizer_email:
-            raise ICSValidationError("Missing organizer email")
-        if not isinstance(self.start_utc, datetime) or not isinstance(self.end_utc, datetime):
-            raise ICSValidationError("start_utc and end_utc must be datetime objects")
+            raise ICSValidationError("Missing organizer_email")
+        if not isinstance(self.start_utc, datetime):
+            raise ICSValidationError("start_utc must be datetime")
+        if not isinstance(self.end_utc, datetime):
+            raise ICSValidationError("end_utc must be datetime")
         if self.end_utc <= self.start_utc:
             raise ICSValidationError("end_utc must be after start_utc")
 
@@ -91,11 +85,7 @@ class ICSInvite:
                     f"ATTENDEE;CN={name};ROLE={role};PARTSTAT=NEEDS-ACTION;RSVP=TRUE:MAILTO:{email}"
                 )
 
-        lines.extend([
-            "END:VEVENT",
-            "END:VCALENDAR"
-        ])
-
+        lines += ["END:VEVENT", "END:VCALENDAR"]
         return "\r\n".join(lines) + "\r\n"
 
 
@@ -110,10 +100,6 @@ def create_ics_from_interview(
     duration_minutes: int,
     uid: Optional[str] = None
 ) -> str:
-    """
-    Creates a proper ICS meeting request that Outlook/Gmail treat as a real invite.
-    """
-
     if start_utc.tzinfo is None:
         start_utc = start_utc.replace(tzinfo=timezone.utc)
 
