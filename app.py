@@ -2832,6 +2832,55 @@ def _extract_slots_from_email_body(text: str) -> List[Dict[str, str]]:
 import re
 from typing import Optional, List, Dict
 
+
+import re
+
+META_START = "---SCHEDULER_META---"
+META_END = "---END_META---"
+
+def build_scheduler_meta_block(meta: dict) -> str:
+    """
+    Converts scheduling metadata into a hidden-ish block that will be included
+    in the outgoing candidate email so we can reconstruct state later.
+    """
+    lines = [META_START]
+    for k, v in meta.items():
+        safe_val = str(v).replace("\n", " ").strip()
+        lines.append(f"{k}={safe_val}")
+    lines.append(META_END)
+    return "\n".join(lines)
+
+def parse_scheduler_meta_block(text: str) -> dict:
+    """
+    Extracts metadata block from an email body if present.
+    Returns dict of key/value pairs.
+    """
+    if not text:
+        return {}
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    pattern = re.compile(
+        re.escape(META_START) + r"(.*?)" + re.escape(META_END),
+        re.DOTALL | re.IGNORECASE
+    )
+
+    m = pattern.search(text)
+    if not m:
+        return {}
+
+    block = m.group(1).strip()
+    meta = {}
+
+    for line in block.split("\n"):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        meta[k.strip()] = v.strip()
+
+    return meta
+
 def detect_slot_choice_from_text(text: str, slots: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
     """
     Detects which slot the candidate selected based on their email reply text.
