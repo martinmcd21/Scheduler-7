@@ -12,9 +12,6 @@ class GraphAuthError(Exception):
 
 
 class GraphConfig:
-    """
-    Compatibility config class expected by app.py
-    """
     def __init__(self, tenant_id=None, client_id=None, client_secret=None):
         self.tenant_id = tenant_id
         self.client_id = client_id
@@ -49,16 +46,9 @@ class GraphClient:
         payload = {
             "message": {
                 "subject": subject,
-                "body": {
-                    "contentType": "HTML",
-                    "content": html_body
-                },
-                "toRecipients": [
-                    {"emailAddress": {"address": e}} for e in to_emails
-                ],
-                "ccRecipients": [
-                    {"emailAddress": {"address": e}} for e in cc_emails
-                ],
+                "body": {"contentType": "HTML", "content": html_body},
+                "toRecipients": [{"emailAddress": {"address": e}} for e in to_emails],
+                "ccRecipients": [{"emailAddress": {"address": e}} for e in cc_emails],
                 "attachments": [
                     {
                         "@odata.type": "#microsoft.graph.fileAttachment",
@@ -67,7 +57,7 @@ class GraphClient:
                         "contentBytes": a["contentBytes"]
                     }
                     for a in attachments
-                ]
+                ],
             },
             "saveToSentItems": True
         }
@@ -76,9 +66,9 @@ class GraphClient:
         r = requests.post(url, headers=self._headers(), json=payload)
 
         if r.status_code in (401, 403):
-            raise GraphAuthError(f"Graph auth error: {r.status_code} {r.text}")
+            raise GraphAuthError(f"Graph auth error {r.status_code}: {r.text}")
 
         if r.status_code not in (200, 201, 202):
-            raise GraphAPIError(f"Graph sendMail failed: {r.status_code} {r.text}")
+            raise GraphAPIError(f"Graph sendMail failed {r.status_code}: {r.text}")
 
         return {"success": True, "status_code": r.status_code}
