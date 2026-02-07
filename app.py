@@ -4469,72 +4469,97 @@ from ics_utils import build_meeting_invite_ics
 
 def _send_invite_for_email(email_data, detected_slot) -> bool:
     """
-    This sends a real Outlook-style meeting invitation via ICS email.
-    It does NOT create a calendar event using Graph.
+    Sends a calendar invitation (ICS meeting request) to the candidate + hiring manager,
+    optionally recruiter, WITHOUT creating any calendar event in Outlook.
+
+    This is the correct "no integrations required" model.
     """
 
     try:
-        # Candidate email
-        candidate_email = email_data.get("from_email") or email_data.get("sender") or ""
-        candidate_email = candidate_email.strip()
+        import base64
+        from datetime import datetime, timedelta
+        from ics_utils import build_meeting_invite_ics
 
-        if not candidate_email:
-            st.error("Could not determine candidate email from reply.")
+        # Candidate email
+        cand_email = (email_data.get("from_email") or email_data.get("sender") or "").strip()
+        if not cand_email:
+            st.error("Could not detect candidate email from message metadata.")
             return False
 
-        # Hiring manager / recruiter details
-        hm_email = st.session_state.get("hm_email", "").strip()
-        hm_name = st.session_state.get("hm_name", "").strip()
+        # Pull config from session state
+        hm_email = (st.session_state.get("hm_email") or "").strip()
+        hm_name = (st.session_state.get("hm_name") or "Hiring Manager").strip()
 
-        rec_email = st.session_state.get("rec_email", "").strip()
+        rec_email = (st.session_state.get("rec_email") or "").strip()
+        rec_name = (st.session_state.get("rec_name") or "Recruiter").strip()
 
-        subject = st.session_state.get("subject", "Interview").strip()
-        agenda = st.session_state.get("agenda", "").strip()
+        role_title = (st.session_state.get("role_title") or st.session_state.get("role") or "Interview").strip()
+        subject = (st.session_state.get("subject") or f"Interview - {role_title}").strip()
+        agenda = (st.session_state.get("agenda") or "").strip()
 
-        timezone_str = st.session_state.get("timezone", "UTC")
-        duration_minutes = int(st.session_state.get("duration_minutes", 30))
+        include_recruiter = bool(st.session_state.get("include_recruiter", True))
+        is_teams = bool(st.session_state.get("is_teams", False))
 
-        use_teams = bool(st.session_state.get("use_teams", False))
+        duration_minutes = st.session_state.get("duration_minutes", 60)
+        try:
+            duration_minutes = int(duration_minutes)
+        except Exception:
+            duration_minutes = 60
+
+        scheduler_mailbox = (st.session_state.get("scheduler_mailbox") or "scheduling@powerdashhr.com").strip()
 
         if not hm_email:
-            st.error("Hiring manager email is missing. Cannot send invite.")
+            st.error("Hiring manager email is missing. Cannot send meeting invite.")
             return False
 
-        # Slot times should already be UTC in detected_slot
-        start_utc = detected_slot["start_utc"]
-        end_utc = detected_slot["end_utc"]
+        # Slot time parsing
+        start_utc = detected_slot.get("start_utc") or detected_slot.get("start")
+        end_utc = detected_slot.get("end_utc") or detected_slot.get("end")
 
-        # Ensure datetime objects
+        if not start_utc:
+            st.error("Detected slot missing start time.")
+            return False
+
+        # If end isn't provided, compute it
+        if not end_utc:
+            if isinstance(start_utc, datetime):
+                end_utc = start_utc + timedelta(minutes=duration_minutes)
+            else:
+                # fallback: try parsing ISO
+                parsed_start = datetime.fromisoformat(str(start_utc).replace("Z", "+00:00")).replace(tzinfo=None)
+                end_utc = parsed_start + timedelta(minutes=duration_minutes)
+
+        # Convert ISO strings to datetime if needed
         if isinstance(start_utc, str):
             start_utc = datetime.fromisoformat(start_utc.replace("Z", "+00:00")).replace(tzinfo=None)
         if isinstance(end_utc, str):
             end_utc = datetime.fromisoformat(end_utc.replace("Z", "+00:00")).replace(tzinfo=None)
 
-        # Meeting location
-        location = "Microsoft Teams Meeting" if use_teams else "Interview"
+        # Candidate name extraction (optional)
+        candidate_name = _ensure_candidate_name("", cand_email)
 
-        # Description body
-        description = agenda or "Interview scheduled via PowerDashHR Interview Scheduler."
+        location = "Microsoft Teams Meeting" if is_teams else "Interview"
 
-        # Organizer is always scheduling mailbox
-        organizer_email = st.session_state.get("scheduler_mailbox", "scheduling@powerdashhr.com")
-        organizer_name = "PowerDashHR Scheduler"
+        description = agenda.strip()
+        if not description:
+            description = f"Interview for {role_title} scheduled via PowerDashHR Interview Scheduler."
 
-        # Required attendees: hiring manager + candidate
-        required_attendees = [hm_email, candidate_email]
+        # Required attendees
+        required_attendees = [hm_email, cand_email]
 
-        # Optional attendees: recruiter if provided
+        # Optional attendees
         optional_attendees = []
-        if rec_email:
+        if include_recruiter and rec_email:
             optional_attendees.append(rec_email)
 
+        # Build ICS meeting request
         ics_bytes = build_meeting_invite_ics(
             subject=subject,
             description=description,
             start_utc=start_utc,
             end_utc=end_utc,
-            organizer_email=organizer_email,
-            organizer_name=organizer_name,
+            organizer_email=scheduler_mailbox,
+            organizer_name="PowerDashHR Scheduler",
             required_attendees=required_attendees,
             optional_attendees=optional_attendees,
             location=location
@@ -4542,23 +4567,19 @@ def _send_invite_for_email(email_data, detected_slot) -> bool:
 
         ics_b64 = base64.b64encode(ics_bytes).decode("utf-8")
 
+        # Email content
         html_body = f"""
         <p>Hello,</p>
         <p>An interview has been scheduled.</p>
-        <p><b>Role:</b> {subject}</p>
+        <p><b>Role:</b> {role_title}</p>
+        <p><b>Candidate:</b> {candidate_name} ({cand_email})</p>
+        <p><b>Hiring Manager:</b> {hm_name} ({hm_email})</p>
         <p><b>Start (UTC):</b> {start_utc}</p>
         <p><b>End (UTC):</b> {end_utc}</p>
-        <p>Please accept or decline using your calendar client.</p>
+        <p><b>Location:</b> {location}</p>
+        <p>Please accept/decline using your calendar client.</p>
         <p>— PowerDashHR Scheduler</p>
         """
-
-        # Send to candidate + hiring manager
-        to_emails = [candidate_email, hm_email]
-
-        # CC recruiter (optional)
-        cc_emails = []
-        if rec_email:
-            cc_emails.append(rec_email)
 
         attachments = [
             {
@@ -4568,124 +4589,33 @@ def _send_invite_for_email(email_data, detected_slot) -> bool:
             }
         ]
 
+        # Send invite email via Graph sendMail
         graph_client = st.session_state.get("graph_client")
         if not graph_client:
-            st.error("Graph client not available. Cannot send invite.")
+            st.error("Graph client not initialized. Cannot send invite.")
             return False
 
-        sender_email = organizer_email
+        to_emails = [cand_email, hm_email]
+
+        cc_emails = []
+        if include_recruiter and rec_email:
+            cc_emails.append(rec_email)
 
         graph_client.send_mail(
-            sender_email=sender_email,
+            sender_email=scheduler_mailbox,
             to_emails=to_emails,
-            subject=f"Interview Scheduled: {subject}",
+            cc_emails=cc_emails,
+            subject=f"Interview Invitation: {role_title}",
             html_body=html_body,
-            attachments=attachments,
-            cc_emails=cc_emails
+            attachments=attachments
         )
 
         return True
 
     except Exception as e:
         st.error(f"Invite send failed: {e}")
-        return False
-                
-
-            # AUTO-SEND PROCESSING: Process emails with detected slots before rendering UI
-            if auto_send_invites and emails:
-                auto_send_results = []
-                for email_item in emails:
-                    email_id = email_item.get("id", "")
-                    # Skip if already processed or already read
-                    if email_id in st.session_state.auto_processed_emails:
-                        continue
-                    if email_item.get("is_read"):
-                        continue
-
-                    # Check for slot choice
-                    full_body = email_item.get("full_body", email_item.get("body", ""))
-                    detected_choice = detect_slot_choice_from_text(full_body, st.session_state.get("slots", []))
-
-                    if detected_choice:
-                        cand_email = email_item.get("from", "")
-                        slot_display = f"{detected_choice.get('date')} {detected_choice.get('start')}-{detected_choice.get('end')}"
-
-                        # Try to send the invite
-                        with st.spinner(f"Auto-sending invite to {cand_email} for slot {slot_display}..."):
-                            success = _send_invite_for_email(email_item, detected_choice)
-
-                        if success:
-                            auto_send_results.append((cand_email, slot_display, True))
-                            # Mark as processed to avoid duplicate sends
-                            st.session_state.auto_processed_emails.add(email_id)
-                        else:
-                            auto_send_results.append((cand_email, slot_display, False))
-
-                # Show auto-send results
-                if auto_send_results:
-                    for cand, slot, success in auto_send_results:
-                        if success:
-                            st.success(f"Auto-sent invite to {cand} for slot {slot}")
-                        # Errors already shown by _send_invite_for_email
-
-            # Render email list UI
-            for i, e in enumerate(emails, start=1):
-                email_id = e.get("id", "")
-                was_auto_processed = email_id in st.session_state.auto_processed_emails
-                read_status = "[SENT]" if was_auto_processed else ("[READ]" if e.get("is_read") else "[NEW]")
-
-                with st.expander(f"{i}. {read_status} {e['subject'] or '(no subject)'} — {e['from']}"):
-                    st.write(e.get("date", ""))
-                    preview_body = e.get("body", "")
-                    full_body = e.get("full_body", preview_body)  # Fall back to preview if full not available
-                    st.text_area("Body Preview", preview_body, height=160, key=f"inbox_body_{i}")
-
-                    # Show full body info for debugging
-                    slots_in_session = len(st.session_state.get("slots", []))
-                    email_slots = _extract_slots_from_email_body(full_body)
-                    slots_in_email = len(email_slots)
-                    st.caption(f"Full body: {len(full_body):,} chars | Session slots: {slots_in_session} | Email slots: {slots_in_email}")
-
-                    candidate_email = e.get("from", "")
-
-                    # Try slot detection - works even if session slots are empty (extracts from email)
-                    choice = detect_slot_choice_from_text(full_body, st.session_state.get("slots", []))
-                    if choice:
-                        st.success(f"Detected slot choice: {choice.get('date')} {choice.get('start')}-{choice.get('end')}")
-
-                        # Check if already auto-processed
-                        if was_auto_processed:
-                            st.info(f"Invite already auto-sent to: {candidate_email}")
-                        elif auto_send_invites:
-                            # Already processed above, but email might be read or had an error
-                            if e.get("is_read"):
-                                st.info(f"Email already read - skipped auto-send. Use manual button if needed.")
-                            # Show manual button as fallback
-                            if st.button(f"Re-send Invite", key=f"resend_slot_{i}"):
-                                with st.spinner("Sending calendar invite..."):
-                                    if _send_invite_for_email(e, choice):
-                                        st.success(f"Calendar invite sent to {candidate_email}!")
-                                        st.session_state.auto_processed_emails.add(email_id)
-                                        st.rerun()
-                        else:
-                            # Manual mode - show confirm button
-                            col1, col2 = st.columns([2, 1])
-                            with col1:
-                                st.info(f"Ready to send invite to: {candidate_email}")
-                            with col2:
-                                if st.button(f"Confirm & Send Invite", key=f"confirm_slot_{i}"):
-                                    with st.spinner("Sending calendar invite..."):
-                                        if _send_invite_for_email(e, choice):
-                                            st.success(f"Calendar invite sent to {candidate_email}!")
-                                            st.rerun()
-                    else:
-                        st.info("No slot choice detected from this email.")
-
-    # ========= TAB: Calendar Invites =========
-    with tab_invites:
-        st.subheader("Interview Management")
-        st.caption("Manage scheduled interviews: reschedule, cancel, or view history.")
-
+        return False 
+        
         def _format_candidates_display(interview_row: Dict[str, Any]) -> str:
             """Format candidate display for table, handling multi-candidate interviews."""
             candidates_json = interview_row.get("candidates_json")
