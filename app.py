@@ -4462,31 +4462,133 @@ def main() -> None:
                 st.write(f"Found {len(emails)} email(s).")
 
             # Helper function to send invite for a detected slot
-            def _send_invite_for_email(email_data: Dict[str, Any], detected_slot: Dict[str, str]) -> bool:
-                """Send calendar invite for a detected slot choice. Returns True on success."""
-                cand_email = email_data.get("from", "")
+            import base64
+from datetime import datetime, timedelta
+from ics_utils import build_meeting_invite_ics
 
-                # Get current form values from session state (keys match form input keys)
-                hm_email = st.session_state.get("hm_email", "")
-                hm_name = st.session_state.get("hm_name", "")
-                rec_email = st.session_state.get("rec_email", "")
-                rec_name = st.session_state.get("rec_name", "")
-                role_title = st.session_state.get("role_title", "")
-                duration = int(st.session_state.get("duration_minutes", 60))
-                tz_name = st.session_state.get("tz_name", "UTC")
-                candidate_tz = st.session_state.get("candidate_timezone", tz_name)
-                is_teams = st.session_state.get("is_teams", True)
-                subject = st.session_state.get("subject", "")
-                agenda = st.session_state.get("agenda", "")
-                location = st.session_state.get("location", "")
-                include_recruiter = st.session_state.get("include_recruiter", True)
-                panel_interviewers = st.session_state.get("panel_interviewers", [])
 
-                # Validate we have minimum required info
-                if not hm_email and not panel_interviewers:
-                    st.error(f"Cannot auto-send to {cand_email}: Please set hiring manager email or panel interviewers in the New Scheduling Request tab first.")
-                    return False
+def _send_invite_for_email(email_data, detected_slot) -> bool:
+    """
+    This sends a real Outlook-style meeting invitation via ICS email.
+    It does NOT create a calendar event using Graph.
+    """
 
+    try:
+        # Candidate email
+        candidate_email = email_data.get("from_email") or email_data.get("sender") or ""
+        candidate_email = candidate_email.strip()
+
+        if not candidate_email:
+            st.error("Could not determine candidate email from reply.")
+            return False
+
+        # Hiring manager / recruiter details
+        hm_email = st.session_state.get("hm_email", "").strip()
+        hm_name = st.session_state.get("hm_name", "").strip()
+
+        rec_email = st.session_state.get("rec_email", "").strip()
+
+        subject = st.session_state.get("subject", "Interview").strip()
+        agenda = st.session_state.get("agenda", "").strip()
+
+        timezone_str = st.session_state.get("timezone", "UTC")
+        duration_minutes = int(st.session_state.get("duration_minutes", 30))
+
+        use_teams = bool(st.session_state.get("use_teams", False))
+
+        if not hm_email:
+            st.error("Hiring manager email is missing. Cannot send invite.")
+            return False
+
+        # Slot times should already be UTC in detected_slot
+        start_utc = detected_slot["start_utc"]
+        end_utc = detected_slot["end_utc"]
+
+        # Ensure datetime objects
+        if isinstance(start_utc, str):
+            start_utc = datetime.fromisoformat(start_utc.replace("Z", "+00:00")).replace(tzinfo=None)
+        if isinstance(end_utc, str):
+            end_utc = datetime.fromisoformat(end_utc.replace("Z", "+00:00")).replace(tzinfo=None)
+
+        # Meeting location
+        location = "Microsoft Teams Meeting" if use_teams else "Interview"
+
+        # Description body
+        description = agenda or "Interview scheduled via PowerDashHR Interview Scheduler."
+
+        # Organizer is always scheduling mailbox
+        organizer_email = st.session_state.get("scheduler_mailbox", "scheduling@powerdashhr.com")
+        organizer_name = "PowerDashHR Scheduler"
+
+        # Required attendees: hiring manager + candidate
+        required_attendees = [hm_email, candidate_email]
+
+        # Optional attendees: recruiter if provided
+        optional_attendees = []
+        if rec_email:
+            optional_attendees.append(rec_email)
+
+        ics_bytes = build_meeting_invite_ics(
+            subject=subject,
+            description=description,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            organizer_email=organizer_email,
+            organizer_name=organizer_name,
+            required_attendees=required_attendees,
+            optional_attendees=optional_attendees,
+            location=location
+        )
+
+        ics_b64 = base64.b64encode(ics_bytes).decode("utf-8")
+
+        html_body = f"""
+        <p>Hello,</p>
+        <p>An interview has been scheduled.</p>
+        <p><b>Role:</b> {subject}</p>
+        <p><b>Start (UTC):</b> {start_utc}</p>
+        <p><b>End (UTC):</b> {end_utc}</p>
+        <p>Please accept or decline using your calendar client.</p>
+        <p>— PowerDashHR Scheduler</p>
+        """
+
+        # Send to candidate + hiring manager
+        to_emails = [candidate_email, hm_email]
+
+        # CC recruiter (optional)
+        cc_emails = []
+        if rec_email:
+            cc_emails.append(rec_email)
+
+        attachments = [
+            {
+                "name": "interview_invite.ics",
+                "contentType": "text/calendar; method=REQUEST",
+                "contentBytes": ics_b64
+            }
+        ]
+
+        graph_client = st.session_state.get("graph_client")
+        if not graph_client:
+            st.error("Graph client not available. Cannot send invite.")
+            return False
+
+        sender_email = organizer_email
+
+        graph_client.send_mail(
+            sender_email=sender_email,
+            to_emails=to_emails,
+            subject=f"Interview Scheduled: {subject}",
+            html_body=html_body,
+            attachments=attachments,
+            cc_emails=cc_emails
+        )
+
+        return True
+
+    except Exception as e:
+        st.error(f"Invite send failed: {e}")
+        return False
                 # Parse candidate name from email if possible
                 candidate_name = _ensure_candidate_name("", cand_email)
 
